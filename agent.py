@@ -193,5 +193,6 @@ if __name__ == "__main__":
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name="outbound-caller",
+            port=8082,  # Use port 8082 to avoid conflict with web agent on 8081
         )
     )
