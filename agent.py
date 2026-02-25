@@ -125,8 +125,19 @@ async def entrypoint(ctx: JobContext):
     # dial_info is a dict with the following keys:
     # - phone_number: the phone number to dial
     # - transfer_to: the phone number to transfer the call to when requested (optional)
-    dial_info = json.loads(ctx.job.metadata)
-    participant_identity = phone_number = dial_info["phone_number"]
+
+    # For console mode (testing), use default values
+    if ctx.job.metadata:
+        dial_info = json.loads(ctx.job.metadata)
+        participant_identity = phone_number = dial_info["phone_number"]
+    else:
+        # Console mode - no actual call
+        logger.info("Running in console mode (no actual call)")
+        dial_info = {
+            "phone_number": "console-test",
+            "transfer_to": None
+        }
+        participant_identity = phone_number = None
 
     # Create the agent with instructions from prompts.py
     agent = OutboundCaller(
@@ -141,51 +152,66 @@ async def entrypoint(ctx: JobContext):
         ),
     )
 
-    # `create_sip_participant` starts dialing the user
-    try:
-        # Start dialing first
-        await ctx.api.sip.create_sip_participant(
-            api.CreateSIPParticipantRequest(
-                room_name=ctx.room.name,
-                sip_trunk_id=outbound_trunk_id,
-                sip_call_to=phone_number,
-                participant_identity=participant_identity,
-                # function blocks until user answers the call, or if the call fails
-                wait_until_answered=True,
+    # Only create SIP participant if we have a phone number (not console mode)
+    if phone_number:
+        # `create_sip_participant` starts dialing the user
+        try:
+            # Start dialing first
+            await ctx.api.sip.create_sip_participant(
+                api.CreateSIPParticipantRequest(
+                    room_name=ctx.room.name,
+                    sip_trunk_id=outbound_trunk_id,
+                    sip_call_to=phone_number,
+                    participant_identity=participant_identity,
+                    # function blocks until user answers the call, or if the call fails
+                    wait_until_answered=True,
+                )
             )
-        )
 
-        # Wait for participant to join
-        participant = await ctx.wait_for_participant(identity=participant_identity)
-        logger.info(f"participant joined: {participant.identity}")
-        agent.set_participant(participant)
+            # Wait for participant to join
+            participant = await ctx.wait_for_participant(identity=participant_identity)
+            logger.info(f"participant joined: {participant.identity}")
+            agent.set_participant(participant)
 
-        # Start session after participant joins to avoid race conditions
+            # Start session after participant joins to avoid race conditions
+            await session.start(
+                agent=agent,
+                room=ctx.room,
+                room_input_options=RoomInputOptions(
+                    # enable Krisp background voice and noise removal
+                    noise_cancellation=noise_cancellation.BVCTelephony(),
+                ),
+            )
+
+            # Generate initial greeting using SESSION_INSTRUCTION from prompts.py
+            await session.generate_reply(
+                instructions=SESSION_INSTRUCTION,
+                allow_interruptions=True,
+            )
+
+        except api.TwirpError as e:
+            logger.error(
+                f"error creating SIP participant: {e.message}, "
+                f"SIP status: {e.metadata.get('sip_status_code')} "
+                f"{e.metadata.get('sip_status')}"
+            )
+            ctx.shutdown()
+        except Exception as e:
+            logger.error(f"unexpected error in entrypoint: {e}")
+            ctx.shutdown()
+    else:
+        # Console mode - start session without SIP participant
+        logger.info("Starting session in console mode")
         await session.start(
             agent=agent,
             room=ctx.room,
-            room_input_options=RoomInputOptions(
-                # enable Krisp background voice and noise removal
-                noise_cancellation=noise_cancellation.BVCTelephony(),
-            ),
         )
 
-        # Generate initial greeting using SESSION_INSTRUCTION from prompts.py
+        # Generate initial greeting
         await session.generate_reply(
             instructions=SESSION_INSTRUCTION,
             allow_interruptions=True,
         )
-
-    except api.TwirpError as e:
-        logger.error(
-            f"error creating SIP participant: {e.message}, "
-            f"SIP status: {e.metadata.get('sip_status_code')} "
-            f"{e.metadata.get('sip_status')}"
-        )
-        ctx.shutdown()
-    except Exception as e:
-        logger.error(f"unexpected error in entrypoint: {e}")
-        ctx.shutdown()
 
 
 if __name__ == "__main__":
