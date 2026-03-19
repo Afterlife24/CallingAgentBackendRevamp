@@ -23,6 +23,7 @@ from livekit.plugins import (
     openai,
     noise_cancellation,
 )
+from livekit.plugins.openai.realtime.realtime_model import TurnDetection
 
 # Import prompts from prompts.py
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
@@ -148,7 +149,12 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         llm=openai.realtime.RealtimeModel(
             voice="alloy",
-            temperature=0.1,
+            turn_detection=TurnDetection(
+                type="server_vad",
+                threshold=0.5,
+                prefix_padding_ms=300,
+                silence_duration_ms=500,
+            ),
         ),
     )
 
