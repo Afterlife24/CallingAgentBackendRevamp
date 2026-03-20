@@ -2,14 +2,15 @@ import os
 import logging
 import signal
 import sys
+import subprocess
 import atexit
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-from dispatcher import OutboundCallDispatcher
 from datetime import datetime
 import uuid
 from livekit import api
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(
@@ -25,8 +26,14 @@ app = Flask(__name__)
 # Global variable to track server state
 server_running = True
 
-# Initialize dispatcher
-dispatcher = OutboundCallDispatcher()
+# Initialize paths
+CALL_HANDLER_DIR = Path(__file__).parent.resolve()
+# Use the venv python explicitly to avoid Flask reloader issues
+_venv_python = CALL_HANDLER_DIR.parent / ".venv" / "bin" / "python3"
+PYTHON_EXECUTABLE = str(
+    _venv_python) if _venv_python.exists() else sys.executable
+logger.info(f"call_handler.py dir: {CALL_HANDLER_DIR}")
+logger.info(f"Python executable: {PYTHON_EXECUTABLE}")
 
 # Global call tracking
 # {call_id: {status, phone_number, room_name, dispatch_id, timestamp}}
@@ -84,8 +91,8 @@ def health_check():
 
 
 @app.route("/makeCall", methods=["POST"])
-async def make_call():
-    """Initiate an outbound call to a phone number using dispatcher"""
+def make_call():
+    """Initiate an outbound call by invoking call_handler.py as a subprocess"""
     logger.info("makeCall endpoint called")
     try:
         data = request.get_json()
@@ -100,47 +107,70 @@ async def make_call():
             logger.error(f"Invalid phone number format: {phone_number}")
             return jsonify({"error": "Phone number must be in E.164 format (e.g., +1234567890)"}), 400
 
-        logger.info(f"Initiating call to {phone_number} using dispatcher")
+        logger.info(f"Initiating call to {phone_number} via call_handler.py")
 
         # Generate unique call ID
         call_id = str(uuid.uuid4())
 
-        # Use dispatcher to make the call
-        result = await dispatcher.make_call(phone_number)
+        # Run call_handler.py as a subprocess — same way it works from CLI
+        result = subprocess.run(
+            [PYTHON_EXECUTABLE, "call_handler.py", phone_number],
+            cwd=str(CALL_HANDLER_DIR),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
-        if result["success"]:
+        logger.info(f"call_handler.py stdout: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"call_handler.py stderr: {result.stderr}")
+
+        if result.returncode == 0:
+            # Parse room name and dispatch ID from stdout
+            room_name = ""
+            dispatch_id = ""
+            for line in result.stdout.splitlines():
+                if "Room:" in line:
+                    room_name = line.split("Room:")[-1].strip()
+                if "Dispatch ID:" in line:
+                    dispatch_id = line.split("Dispatch ID:")[-1].strip()
+
             # Track the call
             active_calls[call_id] = {
                 "status": "connecting",
-                "phone_number": result["phone_number"],
-                "room_name": result["room_name"],
-                "dispatch_id": result["dispatch_id"],
+                "phone_number": phone_number,
+                "room_name": room_name,
+                "dispatch_id": dispatch_id,
                 "timestamp": datetime.now().isoformat()
             }
 
-            logger.info(f"Call dispatch successful: {result}")
+            logger.info(f"Call dispatch successful via call_handler.py")
             return jsonify({
                 "success": True,
                 "call_id": call_id,
-                "room_name": result["room_name"],
-                "dispatch_id": result["dispatch_id"],
-                "phone_number": result["phone_number"],
+                "room_name": room_name,
+                "dispatch_id": dispatch_id,
+                "phone_number": phone_number,
                 "message": "Call initiated successfully. The agent will dial your number shortly."
             }), 200
         else:
-            logger.error(f"Call dispatch failed: {result.get('error')}")
+            error_msg = result.stderr or result.stdout or "call_handler.py failed"
+            logger.error(f"call_handler.py failed: {error_msg}")
             return jsonify({
                 "success": False,
-                "error": result.get("error", "Failed to initiate call")
+                "error": error_msg.strip()
             }), 500
 
+    except subprocess.TimeoutExpired:
+        logger.error("call_handler.py timed out")
+        return jsonify({"error": "Call dispatch timed out"}), 504
     except Exception as e:
         logger.error(f"Error making outbound call: {str(e)}")
         return jsonify({"error": f"Failed to initiate call: {str(e)}"}), 500
 
 
 @app.route("/callStatus/<call_id>", methods=["GET"])
-async def get_call_status(call_id):
+def get_call_status(call_id):
     """Get the status of a call by call_id"""
     logger.info(f"callStatus endpoint called for call_id: {call_id}")
 
@@ -156,50 +186,46 @@ async def get_call_status(call_id):
 
         # Query LiveKit API to get actual room status
         try:
-            lk_api = api.LiveKitAPI(
-                url=os.getenv("LIVEKIT_URL"),
-                api_key=os.getenv("LIVEKIT_API_KEY"),
-                api_secret=os.getenv("LIVEKIT_API_SECRET")
-            )
+            import asyncio
 
-            # List participants in the room
-            participants = await lk_api.room.list_participants(
-                api.ListParticipantsRequest(room=room_name)
-            )
+            async def _check_room():
+                lk_api = api.LiveKitAPI(
+                    url=os.getenv("LIVEKIT_URL"),
+                    api_key=os.getenv("LIVEKIT_API_KEY"),
+                    api_secret=os.getenv("LIVEKIT_API_SECRET")
+                )
+                try:
+                    participants = await lk_api.room.list_participants(
+                        api.ListParticipantsRequest(room=room_name)
+                    )
+                    return len(participants.participants)
+                finally:
+                    await lk_api.aclose()
 
-            await lk_api.aclose()
-
-            # Check participant count to determine call status
-            participant_count = len(participants.participants)
+            participant_count = asyncio.run(_check_room())
             logger.info(
                 f"Room {room_name} has {participant_count} participants")
 
             if participant_count >= 2:
-                # Both agent and caller are in the room - call is connected
                 if call_info["status"] in ["connecting", "connected"]:
                     call_info["status"] = "connected"
                     active_calls[call_id] = call_info
                     logger.info(f"Call {call_id} is connected")
             elif participant_count == 1:
-                # Only agent is in room
                 if call_info["status"] == "connected":
-                    # Was connected, now only 1 participant - caller hung up
                     call_info["status"] = "disconnected"
                     active_calls[call_id] = call_info
                     logger.info(f"Call {call_id} disconnected (caller left)")
                 elif call_info["status"] == "connecting":
-                    # Still waiting for caller to pick up
                     logger.info(
                         f"Call {call_id} still connecting (only agent in room)")
             elif participant_count == 0:
-                # No participants - call ended or failed
                 call_info["status"] = "disconnected"
                 active_calls[call_id] = call_info
                 logger.info(f"Call {call_id} disconnected (no participants)")
 
         except Exception as e:
             logger.warning(f"Could not query LiveKit room status: {str(e)}")
-            # If room doesn't exist, call has ended
             if "not found" in str(e).lower() or "does not exist" in str(e).lower():
                 call_info["status"] = "disconnected"
                 active_calls[call_id] = call_info
@@ -218,7 +244,7 @@ async def get_call_status(call_id):
 
 
 @app.route("/updateCallStatus/<call_id>", methods=["POST"])
-async def update_call_status(call_id):
+def update_call_status(call_id):
     """Update the status of a call (used by agent or webhook)"""
     logger.info(f"updateCallStatus endpoint called for call_id: {call_id}")
 
