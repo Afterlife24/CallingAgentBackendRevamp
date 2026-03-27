@@ -1,8 +1,11 @@
 livekit>=1.0
 livekit-agents~=1.0
-livekit-plugins-google~=1.0
 livekit-plugins-openai~=1.0
+livekit-plugins-cartesia~=1.0
+cartesia
 livekit-plugins-noise-cancellation~=0.2
+livekit-plugins-silero
+livekit-plugins-turn-detector
+huggingface_hub
 python-dotenv~=1.0
 edge-tts~=6.1
-

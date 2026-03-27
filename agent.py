@@ -18,14 +18,22 @@ from livekit.agents import (
     get_job_context,
     cli,
     WorkerOptions,
-    RoomInputOptions,
+    room_io,
+    TurnHandlingOptions,
+    InterruptionOptions,
+    UserStateChangedEvent,
+    AgentStateChangedEvent,
+    FunctionToolsExecutedEvent,
+    ConversationItemAddedEvent,
 )
 from livekit.agents.utils.audio import audio_frames_from_file
 from livekit.plugins import (
+    cartesia,
     openai,
     noise_cancellation,
+    silero,
 )
-from livekit.plugins.openai.realtime.realtime_model import TurnDetection
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 
@@ -35,6 +43,41 @@ logger.setLevel(logging.INFO)
 
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
 GREETING_AUDIO_PATH = Path(__file__).parent / "assets" / "greeting.wav"
+
+
+def _register_session_events(session: AgentSession) -> None:
+    """Register observability event listeners on an AgentSession."""
+
+    @session.on("close")
+    def on_session_close():
+        usage = session.usage
+        if usage and usage.model_usage:
+            for mu in usage.model_usage:
+                logger.info(f"[USAGE] Session totals: {mu}")
+
+    @session.on("conversation_item_added")
+    def on_conversation_item(ev: ConversationItemAddedEvent):
+        item = ev.item
+        logger.info(f"[CONVERSATION] {item.role}: {item.text_content}")
+
+    @session.on("agent_state_changed")
+    def on_agent_state(ev: AgentStateChangedEvent):
+        logger.info(f"[STATE] Agent: {ev.old_state} → {ev.new_state}")
+
+    @session.on("user_state_changed")
+    def on_user_state(ev: UserStateChangedEvent):
+        logger.info(f"[STATE] User: {ev.old_state} → {ev.new_state}")
+
+    @session.on("function_tools_executed")
+    def on_tools_executed(ev: FunctionToolsExecutedEvent):
+        for call, output in ev.zipped():
+            logger.info(
+                f"[TOOL] {call.name}({call.arguments}) → {output.output if output else 'None'}")
+
+    @session.on("user_input_transcribed")
+    def on_transcription(ev):
+        if ev.is_final:
+            logger.info(f"[STT] Final: {ev.transcript}")
 
 
 class OutboundCaller(Agent):
@@ -55,7 +98,7 @@ class OutboundCaller(Agent):
     @function_tool()
     async def transfer_call(self, ctx: RunContext):
         """Transfer the call to a human agent, called after confirming with the user"""
-        transfer_to = self.dial_info["transfer_to"]
+        transfer_to = self.dial_info.get("transfer_to")
         if not transfer_to:
             return "cannot transfer call"
         logger.info(f"transferring call to {transfer_to}")
@@ -83,9 +126,7 @@ class OutboundCaller(Agent):
     async def end_call(self, ctx: RunContext):
         """Called when the user wants to end the call"""
         logger.info(f"ending the call for {self.participant.identity}")
-        current_speech = ctx.session.current_speech
-        if current_speech:
-            await current_speech.wait_for_playout()
+        await ctx.wait_for_playout()
         await self.hangup()
 
     @function_tool()
@@ -196,21 +237,35 @@ async def entrypoint(ctx: JobContext):
             # Audio input stays muted so the realtime model can't hear
             # the user saying "hello" during the greeting and auto-respond.
             session = AgentSession(
-                llm=openai.realtime.RealtimeModel(
-                    voice="alloy",
-                    modalities=["text", "audio"],
-                    turn_detection=TurnDetection(
-                        type="server_vad",
-                        threshold=0.5,
-                        prefix_padding_ms=500,
-                        silence_duration_ms=700,
+                stt=cartesia.STT(model="ink-whisper", language="en"),
+                llm=openai.LLM(
+                    model="llama-3.3-70b-versatile",
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=os.getenv("GROQ_API_KEY"),
+                ),
+                tts=cartesia.TTS(
+                    model="sonic-3",
+                    voice="f786b574-daa5-4673-aa0c-cbe3e8534c02",
+                    language="en",
+                ),
+                vad=silero.VAD.load(),
+                turn_handling=TurnHandlingOptions(
+                    turn_detection=MultilingualModel(),
+                    interruption=InterruptionOptions(
+                        enabled=True,
+                        mode="adaptive",
+                        min_duration=0.5,
+                        min_words=1,
+                        resume_false_interruption=True,
+                        false_interruption_timeout=2.0,
                     ),
                 ),
-                tts=openai.TTS(voice="alloy"),
             )
 
             # Flag to suppress any auto-greeting from the realtime model
             greeting_done = asyncio.Event()
+
+            _register_session_events(session)
 
             @session.on("speech_created")
             def _on_speech_created(ev: Any) -> None:
@@ -221,8 +276,10 @@ async def entrypoint(ctx: JobContext):
             await session.start(
                 agent=agent,
                 room=ctx.room,
-                room_input_options=RoomInputOptions(
-                    noise_cancellation=noise_cancellation.BVCTelephony(),
+                room_options=room_io.RoomOptions(
+                    audio_input=room_io.AudioInputOptions(
+                        noise_cancellation=noise_cancellation.BVCTelephony(),
+                    ),
                 ),
             )
 
@@ -258,17 +315,32 @@ async def entrypoint(ctx: JobContext):
         # Console mode — just start normally
         logger.info("Starting session in console mode")
         session_console = AgentSession(
-            llm=openai.realtime.RealtimeModel(
-                voice="alloy",
-                turn_detection=TurnDetection(
-                    type="server_vad",
-                    threshold=0.5,
-                    prefix_padding_ms=500,
-                    silence_duration_ms=700,
+            stt=cartesia.STT(model="ink-whisper", language="en"),
+            llm=openai.LLM(
+                model="llama-3.3-70b-versatile",
+                base_url="https://api.groq.com/openai/v1",
+                api_key=os.getenv("GROQ_API_KEY"),
+            ),
+            tts=cartesia.TTS(
+                model="sonic-3",
+                voice="f786b574-daa5-4673-aa0c-cbe3e8534c02",
+                language="en",
+            ),
+            vad=silero.VAD.load(),
+            turn_handling=TurnHandlingOptions(
+                turn_detection=MultilingualModel(),
+                interruption=InterruptionOptions(
+                    enabled=True,
+                    mode="adaptive",
+                    min_duration=0.5,
+                    min_words=1,
+                    resume_false_interruption=True,
+                    false_interruption_timeout=2.0,
                 ),
             ),
         )
         await session_console.start(agent=agent, room=ctx.room)
+        _register_session_events(session_console)
         await session_console.generate_reply(
             instructions=SESSION_INSTRUCTION,
             allow_interruptions=False,
