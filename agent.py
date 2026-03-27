@@ -239,7 +239,7 @@ async def entrypoint(ctx: JobContext):
             session = AgentSession(
                 stt=cartesia.STT(model="ink-whisper", language="en"),
                 llm=openai.LLM(
-                    model="llama-3.3-70b-versatile",
+                    model="llama-3.1-8b-instant",
                     base_url="https://api.groq.com/openai/v1",
                     api_key=os.getenv("GROQ_API_KEY"),
                 ),
