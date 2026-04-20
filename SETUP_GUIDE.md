@@ -124,9 +124,9 @@ This lets you test the agent logic without using phone credits.
 
 ## Common Issues
 
-### "Module not found: deepgram"
+### "Module not found: cartesia"
 
-→ Run: `pip install livekit-plugins-deepgram`
+→ Run: `pip install livekit-plugins-cartesia`
 
 ### "SIP trunk not found"
 
