@@ -156,7 +156,7 @@ class OutboundCaller(Agent):
     @function_tool()
     async def get_product_info(self, ctx: RunContext, product: str) -> str:
         """
-        Returns detailed information about an Autonomic AI agent product.
+        Returns detailed information about an Autonomiq AI agent product.
 
         Use this tool whenever the user asks about a specific product's features,
         capabilities, or use cases. Also use it when you need to compare products

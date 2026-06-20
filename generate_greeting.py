@@ -25,7 +25,7 @@ MODEL = "sonic-3"
 TARGET_SAMPLE_RATE = 24000
 
 GREETING_TEXT = (
-    "Hey Hello there! I'm your AI assistant from Autonomic. "
+    "Hey Hello there! I'm your AI assistant from Autonomiq. "
     "We help businesses automate customer interactions with intelligent AI agents. "
     "How can I help you today?"
 )
