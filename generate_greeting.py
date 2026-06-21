@@ -7,6 +7,7 @@ Usage:
 Creates assets/greeting.wav (24kHz, mono, 16-bit PCM).
 Requires CARTESIA_API_KEY in .env.local (or environment).
 """
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -19,13 +20,13 @@ load_dotenv(dotenv_path=".env.local")
 ASSETS_DIR = Path(__file__).parent / "assets"
 OUTPUT_PATH = ASSETS_DIR / "greeting.wav"
 
-# Same voice ID used in agent.py
+# Must match the voice / model used in agent.py
 VOICE_ID = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 MODEL = "sonic-3"
-TARGET_SAMPLE_RATE = 24000
+TARGET_SAMPLE_RATE = 24_000  # Hz, mono, 16-bit PCM
 
 GREETING_TEXT = (
-    "Hey Hello there! I'm your AI assistant from Autonomiq. "
+    "Hey, hello there! I'm your AI assistant from Autonomiq. "
     "We help businesses automate customer interactions with intelligent AI agents. "
     "How can I help you today?"
 )
@@ -35,7 +36,8 @@ def main() -> None:
     api_key = os.environ.get("CARTESIA_API_KEY")
     if not api_key:
         raise ValueError(
-            "CARTESIA_API_KEY is not set in .env.local or environment")
+            "CARTESIA_API_KEY is not set in .env.local or environment"
+        )
 
     ASSETS_DIR.mkdir(exist_ok=True)
 
@@ -57,7 +59,9 @@ def main() -> None:
 
     OUTPUT_PATH.write_bytes(data)
     print(
-        f"✅ Greeting saved to {OUTPUT_PATH} ({len(data)} bytes, {TARGET_SAMPLE_RATE}Hz mono s16le)")
+        f"✅ Greeting saved to {OUTPUT_PATH} "
+        f"({len(data)} bytes, {TARGET_SAMPLE_RATE}Hz mono s16le)"
+    )
 
 
 if __name__ == "__main__":
